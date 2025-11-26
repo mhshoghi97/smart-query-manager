@@ -1,0 +1,99 @@
+
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: smart_query_postgres
+    environment:
+      POSTGRES_DB: query_manager
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d query_manager"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: smart_query_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - app-network
+
+  # FastAPI Application
+  api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: smart_query_api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://admin:password@postgres:5432/query_manager
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk-dummy-key}
+    volumes:
+      - ./app:/app/app  # برای development - تغییرات کد بلافاصله اعمال میشه
+      - ./requirements.txt:/app/requirements.txt  # sync کردن requirements
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r requirements.txt &&
+             uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload"
+    networks:
+      - app-network
+
+  # Celery Worker
+  worker:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: smart_query_worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://admin:password@postgres:5432/query_manager
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk-dummy-key}
+    volumes:
+      - ./app:/app/app
+      - ./requirements.txt:/app/requirements.txt
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r requirements.txt &&
+             celery -A app.workers.tasks worker --loglevel=info"
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  app-network:
+    driver: bridge
